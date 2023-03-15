@@ -32,6 +32,92 @@ from network.wider_resnet import wider_resnet38_a2
 from network.mynn import initialize_weights, Norm2d, Upsample
 
 
+class MySequential(nn.Sequential):
+    """
+    """
+
+    def __init__(self, *args):
+        super(MySequential, self).__init__(*args)
+
+    def forward(self, x, memory=False):
+        # memory=False
+        mem = None
+        for module in self:
+            if memory and isinstance(module, torch.nn.Conv2d):
+                if mem is not None:
+                    mem_2 = torch.clone(mem)
+                mem = x
+            x = module(x)
+        if memory:
+            hm = self.grad_heatmap(x, mem, mem_2).cuda()
+            return torch.concat([x, hm], dim=1)
+        else:
+            return x
+
+    def grad_heatmap(self, x, mem, mem_2):
+        mem = mem.unsqueeze(2)
+
+        mem_2 = mem_2
+
+        sm = torch.nn.functional.softmax(x, dim=1)
+
+        pred = torch.argmax(x, dim=1, keepdim=True)
+        # One-hot Kronecker delta
+        delta = torch.nn.functional.one_hot(pred, num_classes=x.shape[1])
+
+        # Weight tensor for one-hot label
+        weight_oh = sm * (1 - torch.transpose(delta, 1,
+                                              4).squeeze(-1))
+        num_classes = sm.shape[1]
+        # Weight tensor for uniform class label
+        weight_uni = (num_classes - 1) / num_classes * sm
+
+        del sm, pred, delta
+
+        grad_list = []
+        for p in [0.1, 0.3, 0.5, 1, 2]:
+            grad_list.append(torch.norm(weight_oh, dim=1, p=p)
+                             * torch.norm(mem, dim=(1, 2), p=p))
+        for p in [0.1, 0.3, 0.5, 1, 2]:
+            grad_list.append(torch.norm(weight_uni, dim=1, p=p)
+                             * torch.norm(mem, dim=(1, 2), p=p))
+        del mem
+
+        kernel_T = self._modules['6'].weight.data
+        kernel_T = kernel_T.squeeze(3).permute(2, 1, 0)
+        batch_norm_scale_T = self._modules['4'].weight.data
+        batch_norm_scale_T = batch_norm_scale_T.unsqueeze(0)
+
+        # Extract feature map patches pre-convolution
+        patches = nn.functional.unfold(mem_2, (3, 3), padding=1)
+        patches = patches.permute(0, 2, 1).reshape(
+            weight_uni.shape[0], mem_2.shape[2], mem_2.shape[3], mem_2.shape[1], 9).permute(0, 3, 1, 2, 4)
+
+        s_oh = torch.sum(weight_oh[:, None, None, :, :, :].cpu()
+                         * kernel_T[:, :, None, :, None, None].cpu(), dim=3)
+        s_uni = torch.sum(weight_uni[:, None, None, :, :, :].cpu()
+                          * kernel_T[:, :, None, :, None, None].cpu(), dim=3)
+        del weight_oh, weight_uni, kernel_T
+        relu_deriv = (self._modules['4'](mem_2) >= 0).float()[:, :, None, :, :]
+        del mem_2
+
+        s_oh = s_oh.cuda()
+        for p in [0.1, 0.3, 0.5, 1, 2]:
+            grad_list.append(torch.norm(
+                s_oh * relu_deriv * batch_norm_scale_T[..., None, None, None], dim=(1), p=0.5).squeeze() * torch.norm(patches, dim=(1, 4), p=p))
+        del s_oh
+        s_uni = s_uni.cuda()
+        for p in [0.1, 0.3, 0.5, 1, 2]:
+            grad_list.append(torch.norm(
+                s_uni * relu_deriv * batch_norm_scale_T[..., None, None, None], dim=(1), p=0.5).squeeze() * torch.norm(patches, dim=(1, 4), p=p))
+        del s_uni
+        del patches
+
+        del relu_deriv, batch_norm_scale_T
+
+        return torch.stack(grad_list, dim=1)
+
+
 class _AtrousSpatialPyramidPoolingModule(nn.Module):
     """
     operations performed:
@@ -154,8 +240,9 @@ class DeepV3Plus(nn.Module):
 
         self.bot_aspp = nn.Conv2d(1280, 256, kernel_size=1, bias=False)
 
-        self.final = nn.Sequential(
-            nn.Conv2d(256 + self.skip_num, 256, kernel_size=3, padding=1, bias=False),
+        self.final = MySequential(
+            nn.Conv2d(256 + self.skip_num, 256,
+                      kernel_size=3, padding=1, bias=False),
             Norm2d(256),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
@@ -168,7 +255,7 @@ class DeepV3Plus(nn.Module):
         initialize_weights(self.bot_fine)
         initialize_weights(self.final)
 
-    def forward(self, x, gts=None):
+    def forward(self, x, gts=None, memory=False):
 
         x_size = x.size()  # 800
         x0 = self.layer0(x)  # 400
@@ -188,7 +275,7 @@ class DeepV3Plus(nn.Module):
 
         dec0 = [dec0_fine, dec0_up]
         dec0 = torch.cat(dec0, 1)
-        dec1 = self.final(dec0)
+        dec1 = self.final(dec0, memory=memory)
         main_out = Upsample(dec1, x_size[2:])
 
         if self.training:
@@ -247,7 +334,7 @@ class DeepWV3Plus(nn.Module):
         self.bot_fine = nn.Conv2d(128, 48, kernel_size=1, bias=False)
         self.bot_aspp = nn.Conv2d(1280, 256, kernel_size=1, bias=False)
 
-        self.final = nn.Sequential(
+        self.final = MySequential(
             nn.Conv2d(256 + 48, 256, kernel_size=3, padding=1, bias=False),
             Norm2d(256),
             nn.ReLU(inplace=True),
@@ -258,7 +345,7 @@ class DeepWV3Plus(nn.Module):
 
         initialize_weights(self.final)
 
-    def forward(self, inp, gts=None):
+    def forward(self, inp, gts=None, memory=False):
 
         x_size = inp.size()
         x = self.mod1(inp)
@@ -276,7 +363,7 @@ class DeepWV3Plus(nn.Module):
         dec0 = [dec0_fine, dec0_up]
         dec0 = torch.cat(dec0, 1)
 
-        dec1 = self.final(dec0)
+        dec1 = self.final(dec0, memory=memory)
         out = Upsample(dec1, x_size[2:])
 
         if self.training:

@@ -18,8 +18,13 @@ trainid_to_name = cityscapes_labels.trainId2name
 id_to_trainid = cityscapes_labels.label2trainid
 num_classes = 19
 ignore_label = 255
-root = cfg.DATASET.CITYSCAPES_DIR
-aug_root = cfg.DATASET.CITYSCAPES_AUG_DIR
+LAF = False
+if LAF:
+    root = cfg.DATASET.LAF_DIR
+    aug_root = cfg.DATASET.LAF_AUG_DIR
+else:
+    root = cfg.DATASET.CITYSCAPES_DIR
+    aug_root = cfg.DATASET.CITYSCAPES_AUG_DIR
 
 palette = [128, 64, 128, 244, 35, 232, 70, 70, 70, 102, 102, 156, 190, 153, 153,
            153, 153, 153, 250, 170, 30,
@@ -57,8 +62,14 @@ def add_items(items, aug_items, cities, img_path, mask_path, mask_postfix, mode,
             ###### dataset augmentation ############################
             ########################################################
             if mode == "train" and maxSkip > 0:
-                new_img_path = os.path.join(aug_root, 'leftImg8bit_trainvaltest', 'leftImg8bit')
-                new_mask_path = os.path.join(aug_root, 'gtFine_trainvaltest', 'gtFine')
+                if LAF:
+                    new_img_path = os.path.join(
+                        aug_root, 'leftImg8bit_trainvaltest', 'leftImg8bit')
+                    new_mask_path = os.path.join(
+                        aug_root, 'gtFine_trainvaltest', 'gtFine')
+                else:
+                    new_img_path = os.path.join(aug_root, 'leftImg8bit')
+                    new_mask_path = os.path.join(aug_root, 'gtFine')
                 file_info = it.split("_")
                 cur_seq_id = file_info[-1]
 
@@ -85,10 +96,14 @@ def make_cv_splits(img_dir_name):
     split0 is aligned with the default Cityscapes train/val.
     """
     trn_path = os.path.join(root, img_dir_name, 'leftImg8bit', 'train')
-    val_path = os.path.join(root, img_dir_name, 'leftImg8bit', 'val')
+    if LAF:
+        val_path = os.path.join(root, img_dir_name, 'leftImg8bit', 'test')
+        val_cities = ['test/' + c for c in os.listdir(val_path)]
+    else:
+        val_path = os.path.join(root, img_dir_name, 'leftImg8bit', 'val')
+        val_cities = ['val/' + c for c in os.listdir(val_path)]
 
     trn_cities = ['train/' + c for c in os.listdir(trn_path)]
-    val_cities = ['val/' + c for c in os.listdir(val_path)]
 
     # want reproducible randomly shuffled
     trn_cities = sorted(trn_cities)
@@ -96,18 +111,19 @@ def make_cv_splits(img_dir_name):
     all_cities = val_cities + trn_cities
     num_val_cities = len(val_cities)
     num_cities = len(all_cities)
+    if LAF:
+        trn_cities = [x for x in trn_cities if any(["01_" in x, "13_" in x])]
 
     cv_splits = []
     for split_idx in range(cfg.DATASET.CV_SPLITS):
         split = {}
         split['train'] = []
         split['val'] = []
+        split['test'] = []
         offset = split_idx * num_cities // cfg.DATASET.CV_SPLITS
-        for j in range(num_cities):
-            if j >= offset and j < (offset + num_val_cities):
-                split['val'].append(all_cities[j])
-            else:
-                split['train'].append(all_cities[j])
+        split['val'] = val_cities
+        split['test'] = val_cities
+        split['train'] = trn_cities
         cv_splits.append(split)
 
     return cv_splits
@@ -162,10 +178,19 @@ def make_dataset(quality, mode, maxSkip=0, fine_coarse_mult=6, cv_split=0):
                   mask_postfix, mode, maxSkip)
     elif quality == 'fine':
         assert mode in ['train', 'val', 'test', 'trainval']
-        img_dir_name = 'leftImg8bit_trainvaltest'
-        img_path = os.path.join(root, img_dir_name, 'leftImg8bit')
-        mask_path = os.path.join(root, 'gtFine_trainvaltest', 'gtFine')
-        mask_postfix = '_gtFine_labelIds.png'
+        if LAF:
+            img_dir_name = ''
+            # img_dir_name = 'leftImg8bit_trainvaltest'
+            img_path = os.path.join(root, img_dir_name, 'leftImg8bit')
+            # mask_path = os.path.join(root, 'gtFine_trainvaltest', 'gtFine')
+            mask_path = os.path.join(root, 'gtCoarse')
+            # mask_postfix = '_gtFine_labelIds.png'
+            mask_postfix = '_gtCoarse_labelTrainIds.png'
+        else:
+            img_dir_name = ''
+            img_path = os.path.join(root, 'leftImg8bit')
+            mask_path = os.path.join(root, 'gtFine')
+            mask_postfix = '_gtFine_labelIds.png'
         cv_splits = make_cv_splits(img_dir_name)
         if mode == 'trainval':
             modes = ['train', 'val']
